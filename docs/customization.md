@@ -58,6 +58,74 @@ openclaw config set agents.defaults.model.primary "provider/model-name"
 openclaw config set agents.list.1.model.primary "provider/model-name"
 ```
 
+## Using a Custom LLM Provider
+
+Clawdboss supports any OpenAI-compatible API endpoint out of the box. During `setup.sh`, choose option **c** ("Custom LLM provider") and provide:
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| Provider name | Short identifier | `groq`, `ollama`, `deepseek` |
+| Base URL | API endpoint | `https://api.groq.com/openai/v1` |
+| API key | Auth token (optional for local) | `gsk_abc123...` |
+| API type | Protocol compatibility | `openai-completions` (default) |
+| Model ID | Model identifier | `llama-3.3-70b-versatile` |
+| Context window | Max input tokens | `128000` |
+| Max output tokens | Max generation length | `16384` |
+
+### Tested Providers
+
+| Provider | Base URL | API Type |
+|----------|----------|----------|
+| Groq | `https://api.groq.com/openai/v1` | openai-completions |
+| Together AI | `https://api.together.xyz/v1` | openai-completions |
+| Fireworks AI | `https://api.fireworks.ai/inference/v1` | openai-completions |
+| DeepSeek | `https://api.deepseek.com/v1` | openai-completions |
+| Ollama (local) | `http://localhost:11434/v1` | openai-completions |
+| vLLM (local) | `http://localhost:8000/v1` | openai-completions |
+| LiteLLM proxy | `http://localhost:4000` | openai-completions |
+| Mistral AI | `https://api.mistral.ai/v1` | openai-completions |
+| Perplexity | `https://api.perplexity.ai` | openai-completions |
+| xAI (Grok) | `https://api.x.ai/v1` | openai-completions |
+
+### Manual Configuration
+
+You can also edit `~/.openclaw/openclaw.json` directly:
+
+```json
+{
+  "models": {
+    "providers": {
+      "my-provider": {
+        "baseUrl": "https://api.example.com/v1",
+        "apiKey": "${CUSTOM_LLM_API_KEY}",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "model-id",
+            "name": "Display Name",
+            "input": ["text", "image"],
+            "contextWindow": 128000,
+            "maxTokens": 16384
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "my-provider/model-id"
+      }
+    }
+  }
+}
+```
+
+Then set the API key in `~/.openclaw/.env`:
+```dotenv
+CUSTOM_LLM_API_KEY=your-key-here
+```
+
 ## Memory & Context
 
 Clawdboss uses a three-layer memory architecture:

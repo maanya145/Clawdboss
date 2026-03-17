@@ -15,6 +15,259 @@ OPENCLAW_DIR="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}"
 ENV_FILE="$OPENCLAW_DIR/.env"
 CONFIG_FILE="$OPENCLAW_DIR/openclaw.json"
 
+# ---- Answers file support (non-interactive replay) ----
+# Usage: ./setup.sh --answers ~/.openclaw/.answers
+ANSWERS_FILE=""
+ANSWERS_LINE=0
+declare -a ANSWERS_DATA=()
+
+parse_args() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --answers)
+        shift
+        ANSWERS_FILE="${1:-}"
+        if [ -z "$ANSWERS_FILE" ] || [ ! -f "$ANSWERS_FILE" ]; then
+          echo "Error: --answers requires a valid file path" >&2
+          exit 1
+        fi
+        info "Replaying answers from $ANSWERS_FILE"
+        # Load answers into array (skip comments and blank lines)
+        while IFS= read -r line || [ -n "$line" ]; do
+          [[ "$line" =~ ^#.*$ ]] && continue
+          [[ -z "$line" ]] && continue
+          ANSWERS_DATA+=("$line")
+        done < "$ANSWERS_FILE"
+        # Load existing .env so __ENV__ tokens reuse saved keys
+        if [ -f "$ENV_FILE" ]; then
+          # shellcheck disable=SC1090
+          set +u; source "$ENV_FILE" 2>/dev/null; set -u
+          # Map .env variable names to the internal variable names used by collect_keys
+          OPENAI_DIRECT_KEY="${OPENAI_API_KEY:-}"
+          ANTHROPIC_KEY="${ANTHROPIC_API_KEY:-}"
+          GEMINI_KEY="${GEMINI_API_KEY:-}"
+          OPENROUTER_KEY="${OPENROUTER_API_KEY:-}"
+          KIMI_KEY="${KIMI_API_KEY:-}"
+          CUSTOM_API_KEY="${CUSTOM_LLM_API_KEY:-}"
+          DISCORD_TOKEN="${DISCORD_BOT_TOKEN:-}"
+          TELEGRAM_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+          OPENAI_SKILLS_KEY="${OPENAI_API_KEY:-}"
+          GEMINI_SKILLS_KEY="${GEMINI_API_KEY:-}"
+          ELEVENLABS_KEY="${ELEVENLABS_API_KEY:-}"
+          BRAVE_KEY="${BRAVE_API_KEY:-}"
+        fi
+        ;;
+      --help|-h)
+        echo "Usage: ./setup.sh [--answers FILE]"
+        echo ""
+        echo "  --answers FILE  Replay a saved answers file (non-interactive)"
+        echo ""
+        echo "After first run, answers are saved to ~/.openclaw/.answers"
+        echo "Re-run: ./setup.sh --answers ~/.openclaw/.answers"
+        exit 0
+        ;;
+    esac
+    shift
+  done
+}
+
+# When answers file is loaded, this function replaces interactive reads.
+# It auto-fills from the answers array. For __ENV__ tokens, it reads
+# the corresponding value from the existing .env file.
+_next_answer() {
+  if [ "$ANSWERS_LINE" -lt "${#ANSWERS_DATA[@]}" ]; then
+    local answer="${ANSWERS_DATA[$ANSWERS_LINE]}"
+    ANSWERS_LINE=$((ANSWERS_LINE + 1))
+    if [ "$answer" = "__EMPTY__" ]; then
+      echo ""
+    elif [ "$answer" = "__ENV__" ]; then
+      # Signal to the caller that this value should come from .env
+      echo "__ENV__"
+    else
+      echo "$answer"
+    fi
+    return 0
+  fi
+  return 1
+}
+
+# When --answers is active, override `read` to auto-fill from the answers array.
+# This is a bash function that shadows the builtin — transparent to all callers.
+# Supports: read -r VAR, read -rs VAR (silent/secret), read -r (into REPLY)
+enable_answers_mode() {
+  [ -z "$ANSWERS_FILE" ] && return
+
+  # Define read as a function that overrides the builtin
+  read() {
+    local silent=false
+    local raw=false
+    local varname="REPLY"
+    local read_args=()
+
+    # Parse flags the same way bash read does
+    local OPTIND=1
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -r)  raw=true; read_args+=(-r); shift ;;
+        -s)  silent=true; shift ;;
+        -rs|-sr) raw=true; silent=true; read_args+=(-r); shift ;;
+        -*)  read_args+=("$1"); shift ;;
+        *)   varname="$1"; shift ;;
+      esac
+    done
+
+    if [ "$ANSWERS_LINE" -lt "${#ANSWERS_DATA[@]}" ]; then
+      local answer="${ANSWERS_DATA[$ANSWERS_LINE]}"
+      ANSWERS_LINE=$((ANSWERS_LINE + 1))
+
+      # Handle special tokens
+      if [ "$answer" = "__EMPTY__" ]; then
+        answer=""
+      elif [ "$answer" = "__ENV__" ]; then
+        # Secret values: keep existing variable value (pre-loaded from .env)
+        # Don't overwrite — just consume the answer line and return
+        if [ "$silent" = true ]; then
+          echo -e " ${CYAN}(auto)${NC} [from .env]" >&2
+        else
+          echo -e " ${CYAN}(auto)${NC} [from .env]" >&2
+        fi
+        return 0
+      fi
+
+      printf -v "$varname" '%s' "$answer"
+      if [ "$silent" = true ]; then
+        echo -e " ${CYAN}(auto)${NC} ****" >&2
+      elif [ -n "$answer" ]; then
+        echo -e " ${CYAN}(auto)${NC} $answer" >&2
+      else
+        echo -e " ${CYAN}(auto)${NC} [empty]" >&2
+      fi
+      return 0
+    fi
+
+    # Answers exhausted — fall back to interactive
+    if [ "$silent" = true ]; then
+      builtin read -rs "$varname"
+    elif [ "$raw" = true ]; then
+      builtin read -r "$varname"
+    else
+      builtin read "$varname"
+    fi
+  }
+}
+
+# Save all collected answers to a file for replay
+save_answers() {
+  local answers_out="$OPENCLAW_DIR/.answers"
+  cat > "$answers_out" << 'HEADER'
+# Clawdboss answers file — generated by setup.sh
+# Re-run setup without prompts: ./setup.sh --answers ~/.openclaw/.answers
+# Lines starting with # are comments. __EMPTY__ = blank answer.
+# API keys are read from ~/.openclaw/.env — edit that file to update secrets.
+HEADER
+
+  # User info
+  echo "# --- User Info ---" >> "$answers_out"
+  echo "${USER_NAME:-User}" >> "$answers_out"
+  echo "${USER_TIMEZONE:-UTC}" >> "$answers_out"
+  echo "${USER_LOCATION:-__EMPTY__}" >> "$answers_out"
+  echo "${USER_PRONOUNS:-they/them}" >> "$answers_out"
+  echo "${USER_ROLE_CHOICE:-7}" >> "$answers_out"
+  echo "${USER_DESCRIPTION:-__EMPTY__}" >> "$answers_out"
+  echo "${USER_USECASE_CHOICE:-6}" >> "$answers_out"
+  echo "${USER_EXTRA:-__EMPTY__}" >> "$answers_out"
+
+  # Agent info
+  echo "# --- Agent Info ---" >> "$answers_out"
+  echo "${AGENT_NAME:-Assistant}" >> "$answers_out"
+  echo "${AGENT_PRONOUNS:-they/them}" >> "$answers_out"
+  echo "${EMOJI_CHOICE:-1}" >> "$answers_out"
+  echo "${AGENT_VIBE_CHOICE:-2}" >> "$answers_out"
+  # If vibe was custom (choice 6), save the custom text on the next line
+  if [ "${AGENT_VIBE_CHOICE:-2}" = "6" ]; then
+    echo "${AGENT_VIBE:-Helpful and adaptable}" >> "$answers_out"
+  fi
+  echo "${AGENT_MISSION:-__EMPTY__}" >> "$answers_out"
+  echo "${AGENT_EXPERTISE:-__EMPTY__}" >> "$answers_out"
+  echo "${TIER_CHOICE:-1}" >> "$answers_out"
+  echo "${INTERFACE_CHOICE:-1}" >> "$answers_out"
+
+  # Specialist names (only if deployed)
+  if [ "${DEPLOY_COMMS:-false}" = true ]; then
+    echo "${COMMS_NAME:-Knox}" >> "$answers_out"
+  fi
+  if [ "${DEPLOY_RESEARCH:-false}" = true ]; then
+    echo "${RESEARCH_NAME:-Trace}" >> "$answers_out"
+  fi
+  if [ "${DEPLOY_SECURITY:-false}" = true ]; then
+    echo "${SECURITY_NAME:-Sentinel}" >> "$answers_out"
+  fi
+
+  # LLM provider
+  echo "# --- LLM Provider ---" >> "$answers_out"
+  echo "${PROVIDER_CHOICE:-6}" >> "$answers_out"
+  # Provider-specific: use __ENV__ token so keys come from .env, not this file
+  case "${LLM_PROVIDER:-copilot}" in
+    openai)      echo "__ENV__" >> "$answers_out" ;;
+    anthropic)   echo "__ENV__" >> "$answers_out" ;;
+    gemini)      echo "__ENV__" >> "$answers_out" ;;
+    openrouter)  echo "__ENV__" >> "$answers_out" ;;
+    kimi)        echo "__ENV__" >> "$answers_out" ;;
+    custom)
+      echo "${CUSTOM_PROVIDER_NAME:-custom}" >> "$answers_out"
+      echo "${CUSTOM_BASE_URL:-}" >> "$answers_out"
+      echo "__ENV__" >> "$answers_out"
+      echo "${CUSTOM_API_TYPE_CHOICE:-1}" >> "$answers_out"
+      echo "${CUSTOM_MODEL_ID:-}" >> "$answers_out"
+      echo "${CUSTOM_MODEL_NAME:-__EMPTY__}" >> "$answers_out"
+      echo "${CUSTOM_CONTEXT_WINDOW:-128000}" >> "$answers_out"
+      echo "${CUSTOM_MAX_TOKENS:-16384}" >> "$answers_out"
+      echo "${CUSTOM_INPUT_CHOICE:-1}" >> "$answers_out"
+      echo "${CUSTOM_HEARTBEAT_MODEL_ID:-__EMPTY__}" >> "$answers_out"
+      if [ -n "${CUSTOM_HEARTBEAT_MODEL_ID:-}" ]; then
+        echo "${CUSTOM_HEARTBEAT_MODEL_NAME:-__EMPTY__}" >> "$answers_out"
+        echo "${CUSTOM_HEARTBEAT_CTX:-__EMPTY__}" >> "$answers_out"
+        echo "${CUSTOM_HEARTBEAT_MAX:-__EMPTY__}" >> "$answers_out"
+      fi
+      ;;
+  esac
+
+  # Discord/Telegram credentials use __ENV__ tokens
+  if [ "${USE_DISCORD:-false}" = true ]; then
+    echo "# --- Discord ---" >> "$answers_out"
+    echo "__ENV__" >> "$answers_out"
+    echo "${DISCORD_GUILD:-}" >> "$answers_out"
+    echo "${DISCORD_OWNER:-}" >> "$answers_out"
+    echo "${DISCORD_MAIN_CHANNEL:-}" >> "$answers_out"
+    if [ "${DEPLOY_COMMS:-false}" = true ]; then
+      echo "${DISCORD_COMMS_CHANNEL:-}" >> "$answers_out"
+    fi
+    if [ "${DEPLOY_RESEARCH:-false}" = true ]; then
+      echo "${DISCORD_RESEARCH_CHANNEL:-}" >> "$answers_out"
+    fi
+    if [ "${DEPLOY_SECURITY:-false}" = true ]; then
+      echo "${DISCORD_SECURITY_CHANNEL:-}" >> "$answers_out"
+    fi
+  fi
+
+  if [ "${USE_TELEGRAM:-false}" = true ]; then
+    echo "# --- Telegram ---" >> "$answers_out"
+    echo "__ENV__" >> "$answers_out"
+    echo "${TELEGRAM_OWNER_ID:-}" >> "$answers_out"
+  fi
+
+  # Optional keys
+  echo "# --- Optional Keys ---" >> "$answers_out"
+  echo "__ENV__" >> "$answers_out"  # Brave
+  echo "__ENV__" >> "$answers_out"  # OpenAI skills
+  echo "__ENV__" >> "$answers_out"  # Gemini skills
+  echo "__ENV__" >> "$answers_out"  # ElevenLabs
+
+  chmod 600 "$answers_out"
+  success "Answers saved to $answers_out"
+  info "Re-run without prompts: ./setup.sh --answers $answers_out"
+}
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -45,6 +298,12 @@ success() { echo -e "${GREEN}✅${NC} $1"; }
 warn()    { echo -e "${YELLOW}⚠️${NC}  $1"; }
 error()   { echo -e "${RED}❌${NC} $1"; }
 ask()     { echo -en "${CYAN}?${NC}  $1: "; }
+
+# Detect whether systemd is available as the init system.
+# Returns 0 if systemctl is usable, 1 otherwise (containers, WSL1, etc.)
+has_systemd() {
+  [ -d /run/systemd/system ] && command -v systemctl &>/dev/null
+}
 
 # Download a file and verify its SHA-256 checksum.
 # Usage: download_verified <url> <output_path> <expected_sha256>
@@ -595,9 +854,11 @@ collect_keys() {
   echo "  8) Google Gemini CLI OAuth (Google account)"
   echo "  9) Anthropic Claude setup-token (Max subscription)"
   echo ""
+  echo "  ${BOLD}Custom:${NC}"
+  echo "  c) Custom LLM provider (any OpenAI-compatible or custom endpoint)"
   echo "  0) Other / manual config"
   echo ""
-  ask "Choose provider [0-9]"
+  ask "Choose provider [0-9, c]"
   read -r PROVIDER_CHOICE
   PROVIDER_CHOICE="${PROVIDER_CHOICE:-6}"
 
@@ -660,6 +921,95 @@ collect_keys() {
       info "Requires Claude Max/Team subscription."
       warn "Anthropic may restrict non-Claude usage. Check current terms."
       OAUTH_DEFERRED="anthropic"
+      ;;
+    c|C)
+      LLM_PROVIDER="custom"
+      echo ""
+      info "Custom LLM provider setup — works with any OpenAI-compatible API"
+      info "(Ollama, Together AI, Groq, Fireworks, DeepSeek, vLLM, LiteLLM, etc.)"
+      echo ""
+
+      ask "Provider name (short identifier, e.g. 'groq', 'ollama', 'deepseek')"
+      read -r CUSTOM_PROVIDER_NAME
+      CUSTOM_PROVIDER_NAME="${CUSTOM_PROVIDER_NAME:-custom}"
+      # Sanitize: lowercase, alphanumeric + hyphens only
+      CUSTOM_PROVIDER_NAME=$(echo "$CUSTOM_PROVIDER_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+
+      while true; do
+        ask "Base URL (e.g. https://api.groq.com/openai/v1, http://localhost:11434/v1)"
+        read -r CUSTOM_BASE_URL
+        [ -n "$CUSTOM_BASE_URL" ] && break
+        warn "Base URL is required for custom providers"
+      done
+
+      ask "API key (leave empty if not required, e.g. local Ollama)"
+      read -rs CUSTOM_API_KEY
+      echo ""
+
+      echo ""
+      echo "  ${BOLD}API compatibility:${NC}"
+      echo "  1) OpenAI-compatible (default — works with most providers)"
+      echo "  2) Google Generative AI compatible"
+      echo "  3) Anthropic compatible"
+      ask "API type [1-3]"
+      read -r CUSTOM_API_TYPE_CHOICE
+      case "$CUSTOM_API_TYPE_CHOICE" in
+        2) CUSTOM_API_TYPE="google-generative-ai" ;;
+        3) CUSTOM_API_TYPE="anthropic" ;;
+        *) CUSTOM_API_TYPE="openai-completions" ;;
+      esac
+
+      echo ""
+      while true; do
+        ask "Model ID (e.g. 'llama-3.3-70b', 'deepseek-chat', 'mixtral-8x7b')"
+        read -r CUSTOM_MODEL_ID
+        [ -n "$CUSTOM_MODEL_ID" ] && break
+        warn "Model ID is required"
+      done
+
+      ask "Model display name [${CUSTOM_MODEL_ID}]"
+      read -r CUSTOM_MODEL_NAME
+      CUSTOM_MODEL_NAME="${CUSTOM_MODEL_NAME:-$CUSTOM_MODEL_ID}"
+
+      ask "Context window size in tokens [128000]"
+      read -r CUSTOM_CONTEXT_WINDOW
+      CUSTOM_CONTEXT_WINDOW="${CUSTOM_CONTEXT_WINDOW:-128000}"
+
+      ask "Max output tokens [16384]"
+      read -r CUSTOM_MAX_TOKENS
+      CUSTOM_MAX_TOKENS="${CUSTOM_MAX_TOKENS:-16384}"
+
+      echo ""
+      echo "  ${BOLD}Input modalities:${NC}"
+      echo "  1) Text only"
+      echo "  2) Text + Image (multimodal)"
+      ask "Input type [1-2]"
+      read -r CUSTOM_INPUT_CHOICE
+      case "$CUSTOM_INPUT_CHOICE" in
+        2) CUSTOM_INPUT_MODALITIES="text,image" ;;
+        *) CUSTOM_INPUT_MODALITIES="text" ;;
+      esac
+
+      # Optional: secondary/heartbeat model
+      echo ""
+      ask "Secondary model ID for heartbeat tasks (leave empty to reuse primary)"
+      read -r CUSTOM_HEARTBEAT_MODEL_ID
+      if [ -n "$CUSTOM_HEARTBEAT_MODEL_ID" ]; then
+        ask "Secondary model display name [${CUSTOM_HEARTBEAT_MODEL_ID}]"
+        read -r CUSTOM_HEARTBEAT_MODEL_NAME
+        CUSTOM_HEARTBEAT_MODEL_NAME="${CUSTOM_HEARTBEAT_MODEL_NAME:-$CUSTOM_HEARTBEAT_MODEL_ID}"
+
+        ask "Secondary context window [${CUSTOM_CONTEXT_WINDOW}]"
+        read -r CUSTOM_HEARTBEAT_CTX
+        CUSTOM_HEARTBEAT_CTX="${CUSTOM_HEARTBEAT_CTX:-$CUSTOM_CONTEXT_WINDOW}"
+
+        ask "Secondary max output tokens [${CUSTOM_MAX_TOKENS}]"
+        read -r CUSTOM_HEARTBEAT_MAX
+        CUSTOM_HEARTBEAT_MAX="${CUSTOM_HEARTBEAT_MAX:-$CUSTOM_MAX_TOKENS}"
+      fi
+
+      echo ""
+      success "Custom provider '${CUSTOM_PROVIDER_NAME}' configured"
       ;;
     0)
       LLM_PROVIDER="manual"
@@ -893,6 +1243,10 @@ ENVEOF
     echo "OPENROUTER_API_KEY=${OPENROUTER_KEY}" >> "$ENV_FILE"
   elif [ "$LLM_PROVIDER" = "kimi" ]; then
     echo "KIMI_API_KEY=${KIMI_KEY}" >> "$ENV_FILE"
+  elif [ "$LLM_PROVIDER" = "custom" ] && [ -n "$CUSTOM_API_KEY" ]; then
+    echo "" >> "$ENV_FILE"
+    echo "# Custom LLM Provider (${CUSTOM_PROVIDER_NAME})" >> "$ENV_FILE"
+    echo "CUSTOM_LLM_API_KEY=${CUSTOM_API_KEY}" >> "$ENV_FILE"
   fi
 
   if [ "$USE_DISCORD" = true ]; then
@@ -962,6 +1316,23 @@ generate_config() {
   export CB_ELEVENLABS_KEY="${ELEVENLABS_KEY:-}"
   export CB_BRAVE_KEY="${BRAVE_KEY:-}"
   export CB_GEMINI_SKILLS_KEY="${GEMINI_SKILLS_KEY:-${GEMINI_KEY:-}}"
+
+  # Custom provider variables
+  if [ "$LLM_PROVIDER" = "custom" ]; then
+    export CB_CUSTOM_PROVIDER_NAME="${CUSTOM_PROVIDER_NAME:-custom}"
+    export CB_CUSTOM_BASE_URL="${CUSTOM_BASE_URL:-}"
+    export CB_CUSTOM_API_KEY="${CUSTOM_API_KEY:-}"
+    export CB_CUSTOM_API_TYPE="${CUSTOM_API_TYPE:-openai-completions}"
+    export CB_CUSTOM_MODEL_ID="${CUSTOM_MODEL_ID:-}"
+    export CB_CUSTOM_MODEL_NAME="${CUSTOM_MODEL_NAME:-}"
+    export CB_CUSTOM_CONTEXT_WINDOW="${CUSTOM_CONTEXT_WINDOW:-128000}"
+    export CB_CUSTOM_MAX_TOKENS="${CUSTOM_MAX_TOKENS:-16384}"
+    export CB_CUSTOM_INPUT_MODALITIES="${CUSTOM_INPUT_MODALITIES:-text}"
+    export CB_CUSTOM_HEARTBEAT_MODEL_ID="${CUSTOM_HEARTBEAT_MODEL_ID:-}"
+    export CB_CUSTOM_HEARTBEAT_MODEL_NAME="${CUSTOM_HEARTBEAT_MODEL_NAME:-}"
+    export CB_CUSTOM_HEARTBEAT_CTX="${CUSTOM_HEARTBEAT_CTX:-}"
+    export CB_CUSTOM_HEARTBEAT_MAX="${CUSTOM_HEARTBEAT_MAX:-}"
+  fi
   export CB_USE_DISCORD="$USE_DISCORD"
   export CB_USE_TELEGRAM="$USE_TELEGRAM"
   export CB_USE_CONSOLE="$USE_CONSOLE"
@@ -1219,6 +1590,53 @@ elif llm_provider == "gemini-cli-oauth":
 elif llm_provider == "anthropic-oauth":
     # Setup-token login happens post-setup via openclaw models auth
     config['agents']['defaults']['model']['primary'] = "anthropic/claude-sonnet-4-5-20250514"
+elif llm_provider == "custom":
+    custom_name = os.environ.get('CB_CUSTOM_PROVIDER_NAME', 'custom')
+    custom_base_url = os.environ.get('CB_CUSTOM_BASE_URL', '')
+    custom_api_key = os.environ.get('CB_CUSTOM_API_KEY', '')
+    custom_api_type = os.environ.get('CB_CUSTOM_API_TYPE', 'openai-completions')
+    custom_model_id = os.environ.get('CB_CUSTOM_MODEL_ID', '')
+    custom_model_name = os.environ.get('CB_CUSTOM_MODEL_NAME', custom_model_id)
+    def safe_int(val, default):
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return default
+    custom_ctx = safe_int(os.environ.get('CB_CUSTOM_CONTEXT_WINDOW'), 128000)
+    custom_max = safe_int(os.environ.get('CB_CUSTOM_MAX_TOKENS'), 16384)
+    custom_input = os.environ.get('CB_CUSTOM_INPUT_MODALITIES', 'text').split(',')
+    custom_hb_model = os.environ.get('CB_CUSTOM_HEARTBEAT_MODEL_ID', '')
+    custom_hb_name = os.environ.get('CB_CUSTOM_HEARTBEAT_MODEL_NAME', custom_hb_model)
+    custom_hb_ctx = os.environ.get('CB_CUSTOM_HEARTBEAT_CTX', '')
+    custom_hb_max = os.environ.get('CB_CUSTOM_HEARTBEAT_MAX', '')
+
+    provider_config = {
+        "baseUrl": custom_base_url,
+        "models": [
+            {"id": custom_model_id, "name": custom_model_name, "input": custom_input, "contextWindow": custom_ctx, "maxTokens": custom_max}
+        ]
+    }
+    # Only add apiKey if provided (some local providers like Ollama don't need one)
+    if custom_api_key:
+        provider_config["apiKey"] = "${CUSTOM_LLM_API_KEY}"
+    # Only add api type if not default (anthropic type doesn't need explicit api field)
+    if custom_api_type and custom_api_type != "anthropic":
+        provider_config["api"] = custom_api_type
+
+    # Add secondary/heartbeat model if configured
+    if custom_hb_model:
+        hb_ctx = safe_int(custom_hb_ctx, custom_ctx)
+        hb_max = safe_int(custom_hb_max, custom_max)
+        provider_config["models"].append(
+            {"id": custom_hb_model, "name": custom_hb_name, "input": custom_input, "contextWindow": hb_ctx, "maxTokens": hb_max}
+        )
+
+    config['models']['providers'] = {custom_name: provider_config}
+    config['agents']['defaults']['model']['primary'] = f"{custom_name}/{custom_model_id}"
+    if custom_hb_model:
+        config['agents']['defaults']['heartbeat']['model'] = f"{custom_name}/{custom_hb_model}"
+    else:
+        config['agents']['defaults']['heartbeat']['model'] = f"{custom_name}/{custom_model_id}"
 
 # Skills with keys
 if openai_skills_key:
@@ -1261,7 +1679,11 @@ PYEOF
   unset CB_DISCORD_MAIN_CHANNEL CB_DEPLOY_COMMS CB_DEPLOY_RESEARCH CB_DEPLOY_SECURITY
   unset CB_LLM_PROVIDER CB_OPENAI_SKILLS_KEY CB_ELEVENLABS_KEY CB_BRAVE_KEY CB_GEMINI_SKILLS_KEY
   unset CB_COMMS_NAME CB_DISCORD_COMMS_CHANNEL CB_RESEARCH_NAME CB_DISCORD_RESEARCH_CHANNEL
-  unset CB_SECURITY_NAME CB_DISCORD_SECURITY_CHANNEL CB_USE_TELEGRAM CB_TELEGRAM_OWNER 2>/dev/null || true
+  unset CB_SECURITY_NAME CB_DISCORD_SECURITY_CHANNEL CB_USE_TELEGRAM CB_TELEGRAM_OWNER
+  unset CB_CUSTOM_PROVIDER_NAME CB_CUSTOM_BASE_URL CB_CUSTOM_API_KEY CB_CUSTOM_API_TYPE
+  unset CB_CUSTOM_MODEL_ID CB_CUSTOM_MODEL_NAME CB_CUSTOM_CONTEXT_WINDOW CB_CUSTOM_MAX_TOKENS
+  unset CB_CUSTOM_INPUT_MODALITIES CB_CUSTOM_HEARTBEAT_MODEL_ID CB_CUSTOM_HEARTBEAT_MODEL_NAME
+  unset CB_CUSTOM_HEARTBEAT_CTX CB_CUSTOM_HEARTBEAT_MAX 2>/dev/null || true
 }
 
 # ============================================================
@@ -2225,9 +2647,13 @@ main() {
 
   # Check for existing config
   if [ -f "$CONFIG_FILE" ]; then
-    warn "Existing config found at $CONFIG_FILE"
-    ask "Overwrite? This will backup the current config [y/N]"
-    read -r OVERWRITE
+    if [ -n "$ANSWERS_FILE" ]; then
+      OVERWRITE="y"
+    else
+      warn "Existing config found at $CONFIG_FILE"
+      ask "Overwrite? This will backup the current config [y/N]"
+      read -r OVERWRITE
+    fi
     if [[ ! "$OVERWRITE" =~ ^[Yy] ]]; then
       info "Aborting. Your existing config is untouched."
       exit 0
@@ -2412,7 +2838,7 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 [Install]
 WantedBy=multi-user.target
 CADDYSVC
-                      systemctl daemon-reload 2>/dev/null
+                      systemctl daemon-reload 2>/dev/null || true
                     fi
 
                     success "Caddy ${CADDY_VER} installed from GitHub release"
@@ -2659,7 +3085,7 @@ maxretry = 5
 enabled = true
 JAIL_EOF
       if [ $? -eq 0 ]; then
-        sudo systemctl restart fail2ban 2>/dev/null
+        sudo systemctl restart fail2ban 2>/dev/null || true
         success "SSH jail configured (ban 1h after 5 failures in 10m)"
       else
         warn "Could not create jail.local. Configure manually: /etc/fail2ban/jail.local"
@@ -2809,7 +3235,7 @@ JAIL_EOF
     fi
   else
     # Non-root — try systemd service, fall back to tmux
-    if [ -d /etc/systemd/system ] && command -v systemctl &>/dev/null; then
+    if has_systemd; then
       # Create systemd service if it doesn't exist
       if [ ! -f /etc/systemd/system/openclaw.service ]; then
         info "Setting up OpenClaw as a systemd service..."
@@ -2849,12 +3275,12 @@ RestrictSUIDSGID=true
 [Install]
 WantedBy=multi-user.target
 SVCEOF
-        sudo systemctl daemon-reload 2>/dev/null
-        sudo systemctl enable openclaw 2>/dev/null
+        sudo systemctl daemon-reload 2>/dev/null || true
+        sudo systemctl enable openclaw 2>/dev/null || true
         success "Systemd service created and enabled"
       fi
 
-      sudo systemctl start openclaw 2>/dev/null
+      sudo systemctl start openclaw 2>/dev/null || true
       sleep 2
       if systemctl is-active --quiet openclaw 2>/dev/null; then
         success "Gateway started via systemd"
@@ -2896,6 +3322,9 @@ SVCEOF
 
   # ---- Server Hardening ----
   harden_server
+
+  # Save answers for non-interactive replay
+  save_answers
 
   show_summary
 }
@@ -3631,4 +4060,6 @@ harden_server() {
   fi
 }
 
+parse_args "$@"
+enable_answers_mode
 main "$@"
