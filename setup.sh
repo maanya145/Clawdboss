@@ -595,9 +595,11 @@ collect_keys() {
   echo "  8) Google Gemini CLI OAuth (Google account)"
   echo "  9) Anthropic Claude setup-token (Max subscription)"
   echo ""
+  echo "  ${BOLD}Custom:${NC}"
+  echo "  c) Custom LLM provider (any OpenAI-compatible or custom endpoint)"
   echo "  0) Other / manual config"
   echo ""
-  ask "Choose provider [0-9]"
+  ask "Choose provider [0-9, c]"
   read -r PROVIDER_CHOICE
   PROVIDER_CHOICE="${PROVIDER_CHOICE:-6}"
 
@@ -660,6 +662,97 @@ collect_keys() {
       info "Requires Claude Max/Team subscription."
       warn "Anthropic may restrict non-Claude usage. Check current terms."
       OAUTH_DEFERRED="anthropic"
+      ;;
+    c|C)
+      LLM_PROVIDER="custom"
+      echo ""
+      info "Custom LLM provider setup — works with any OpenAI-compatible API"
+      info "(Ollama, Together AI, Groq, Fireworks, DeepSeek, vLLM, LiteLLM, etc.)"
+      echo ""
+
+      ask "Provider name (short identifier, e.g. 'groq', 'ollama', 'deepseek')"
+      read -r CUSTOM_PROVIDER_NAME
+      CUSTOM_PROVIDER_NAME="${CUSTOM_PROVIDER_NAME:-custom}"
+      # Sanitize: lowercase, alphanumeric + hyphens only
+      CUSTOM_PROVIDER_NAME=$(echo "$CUSTOM_PROVIDER_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+
+      ask "Base URL (e.g. https://api.groq.com/openai/v1, http://localhost:11434/v1)"
+      read -r CUSTOM_BASE_URL
+      if [ -z "$CUSTOM_BASE_URL" ]; then
+        warn "Base URL is required for custom providers"
+        ask "Base URL"
+        read -r CUSTOM_BASE_URL
+      fi
+
+      ask "API key (leave empty if not required, e.g. local Ollama)"
+      read -rs CUSTOM_API_KEY
+      echo ""
+
+      echo ""
+      echo "  ${BOLD}API compatibility:${NC}"
+      echo "  1) OpenAI-compatible (default — works with most providers)"
+      echo "  2) Google Generative AI compatible"
+      echo "  3) Anthropic compatible"
+      ask "API type [1-3]"
+      read -r CUSTOM_API_TYPE_CHOICE
+      case "$CUSTOM_API_TYPE_CHOICE" in
+        2) CUSTOM_API_TYPE="google-generative-ai" ;;
+        3) CUSTOM_API_TYPE="anthropic" ;;
+        *) CUSTOM_API_TYPE="openai-completions" ;;
+      esac
+
+      echo ""
+      ask "Model ID (e.g. 'llama-3.3-70b', 'deepseek-chat', 'mixtral-8x7b')"
+      read -r CUSTOM_MODEL_ID
+      if [ -z "$CUSTOM_MODEL_ID" ]; then
+        warn "Model ID is required"
+        ask "Model ID"
+        read -r CUSTOM_MODEL_ID
+      fi
+
+      ask "Model display name [${CUSTOM_MODEL_ID}]"
+      read -r CUSTOM_MODEL_NAME
+      CUSTOM_MODEL_NAME="${CUSTOM_MODEL_NAME:-$CUSTOM_MODEL_ID}"
+
+      ask "Context window size in tokens [128000]"
+      read -r CUSTOM_CONTEXT_WINDOW
+      CUSTOM_CONTEXT_WINDOW="${CUSTOM_CONTEXT_WINDOW:-128000}"
+
+      ask "Max output tokens [16384]"
+      read -r CUSTOM_MAX_TOKENS
+      CUSTOM_MAX_TOKENS="${CUSTOM_MAX_TOKENS:-16384}"
+
+      echo ""
+      echo "  ${BOLD}Input modalities:${NC}"
+      echo "  1) Text only"
+      echo "  2) Text + Image (multimodal)"
+      ask "Input type [1-2]"
+      read -r CUSTOM_INPUT_CHOICE
+      case "$CUSTOM_INPUT_CHOICE" in
+        2) CUSTOM_INPUT_MODALITIES="text,image" ;;
+        *) CUSTOM_INPUT_MODALITIES="text" ;;
+      esac
+
+      # Optional: secondary/heartbeat model
+      echo ""
+      ask "Secondary model ID for heartbeat tasks (leave empty to reuse primary)"
+      read -r CUSTOM_HEARTBEAT_MODEL_ID
+      if [ -n "$CUSTOM_HEARTBEAT_MODEL_ID" ]; then
+        ask "Secondary model display name [${CUSTOM_HEARTBEAT_MODEL_ID}]"
+        read -r CUSTOM_HEARTBEAT_MODEL_NAME
+        CUSTOM_HEARTBEAT_MODEL_NAME="${CUSTOM_HEARTBEAT_MODEL_NAME:-$CUSTOM_HEARTBEAT_MODEL_ID}"
+
+        ask "Secondary context window [${CUSTOM_CONTEXT_WINDOW}]"
+        read -r CUSTOM_HEARTBEAT_CTX
+        CUSTOM_HEARTBEAT_CTX="${CUSTOM_HEARTBEAT_CTX:-$CUSTOM_CONTEXT_WINDOW}"
+
+        ask "Secondary max output tokens [${CUSTOM_MAX_TOKENS}]"
+        read -r CUSTOM_HEARTBEAT_MAX
+        CUSTOM_HEARTBEAT_MAX="${CUSTOM_HEARTBEAT_MAX:-$CUSTOM_MAX_TOKENS}"
+      fi
+
+      echo ""
+      success "Custom provider '${CUSTOM_PROVIDER_NAME}' configured"
       ;;
     0)
       LLM_PROVIDER="manual"
@@ -893,6 +986,10 @@ ENVEOF
     echo "OPENROUTER_API_KEY=${OPENROUTER_KEY}" >> "$ENV_FILE"
   elif [ "$LLM_PROVIDER" = "kimi" ]; then
     echo "KIMI_API_KEY=${KIMI_KEY}" >> "$ENV_FILE"
+  elif [ "$LLM_PROVIDER" = "custom" ]; then
+    echo "" >> "$ENV_FILE"
+    echo "# Custom LLM Provider (${CUSTOM_PROVIDER_NAME})" >> "$ENV_FILE"
+    echo "CUSTOM_LLM_API_KEY=${CUSTOM_API_KEY}" >> "$ENV_FILE"
   fi
 
   if [ "$USE_DISCORD" = true ]; then
@@ -962,6 +1059,23 @@ generate_config() {
   export CB_ELEVENLABS_KEY="${ELEVENLABS_KEY:-}"
   export CB_BRAVE_KEY="${BRAVE_KEY:-}"
   export CB_GEMINI_SKILLS_KEY="${GEMINI_SKILLS_KEY:-${GEMINI_KEY:-}}"
+
+  # Custom provider variables
+  if [ "$LLM_PROVIDER" = "custom" ]; then
+    export CB_CUSTOM_PROVIDER_NAME="${CUSTOM_PROVIDER_NAME:-custom}"
+    export CB_CUSTOM_BASE_URL="${CUSTOM_BASE_URL:-}"
+    export CB_CUSTOM_API_KEY="${CUSTOM_API_KEY:-}"
+    export CB_CUSTOM_API_TYPE="${CUSTOM_API_TYPE:-openai-completions}"
+    export CB_CUSTOM_MODEL_ID="${CUSTOM_MODEL_ID:-}"
+    export CB_CUSTOM_MODEL_NAME="${CUSTOM_MODEL_NAME:-}"
+    export CB_CUSTOM_CONTEXT_WINDOW="${CUSTOM_CONTEXT_WINDOW:-128000}"
+    export CB_CUSTOM_MAX_TOKENS="${CUSTOM_MAX_TOKENS:-16384}"
+    export CB_CUSTOM_INPUT_MODALITIES="${CUSTOM_INPUT_MODALITIES:-text}"
+    export CB_CUSTOM_HEARTBEAT_MODEL_ID="${CUSTOM_HEARTBEAT_MODEL_ID:-}"
+    export CB_CUSTOM_HEARTBEAT_MODEL_NAME="${CUSTOM_HEARTBEAT_MODEL_NAME:-}"
+    export CB_CUSTOM_HEARTBEAT_CTX="${CUSTOM_HEARTBEAT_CTX:-}"
+    export CB_CUSTOM_HEARTBEAT_MAX="${CUSTOM_HEARTBEAT_MAX:-}"
+  fi
   export CB_USE_DISCORD="$USE_DISCORD"
   export CB_USE_TELEGRAM="$USE_TELEGRAM"
   export CB_USE_CONSOLE="$USE_CONSOLE"
@@ -1219,6 +1333,53 @@ elif llm_provider == "gemini-cli-oauth":
 elif llm_provider == "anthropic-oauth":
     # Setup-token login happens post-setup via openclaw models auth
     config['agents']['defaults']['model']['primary'] = "anthropic/claude-sonnet-4-5-20250514"
+elif llm_provider == "custom":
+    custom_name = os.environ.get('CB_CUSTOM_PROVIDER_NAME', 'custom')
+    custom_base_url = os.environ.get('CB_CUSTOM_BASE_URL', '')
+    custom_api_key = os.environ.get('CB_CUSTOM_API_KEY', '')
+    custom_api_type = os.environ.get('CB_CUSTOM_API_TYPE', 'openai-completions')
+    custom_model_id = os.environ.get('CB_CUSTOM_MODEL_ID', '')
+    custom_model_name = os.environ.get('CB_CUSTOM_MODEL_NAME', custom_model_id)
+    def safe_int(val, default):
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return default
+    custom_ctx = safe_int(os.environ.get('CB_CUSTOM_CONTEXT_WINDOW'), 128000)
+    custom_max = safe_int(os.environ.get('CB_CUSTOM_MAX_TOKENS'), 16384)
+    custom_input = os.environ.get('CB_CUSTOM_INPUT_MODALITIES', 'text').split(',')
+    custom_hb_model = os.environ.get('CB_CUSTOM_HEARTBEAT_MODEL_ID', '')
+    custom_hb_name = os.environ.get('CB_CUSTOM_HEARTBEAT_MODEL_NAME', custom_hb_model)
+    custom_hb_ctx = os.environ.get('CB_CUSTOM_HEARTBEAT_CTX', '')
+    custom_hb_max = os.environ.get('CB_CUSTOM_HEARTBEAT_MAX', '')
+
+    provider_config = {
+        "baseUrl": custom_base_url,
+        "models": [
+            {"id": custom_model_id, "name": custom_model_name, "input": custom_input, "contextWindow": custom_ctx, "maxTokens": custom_max}
+        ]
+    }
+    # Only add apiKey if provided (some local providers like Ollama don't need one)
+    if custom_api_key:
+        provider_config["apiKey"] = "${CUSTOM_LLM_API_KEY}"
+    # Only add api type if not default (anthropic type doesn't need explicit api field)
+    if custom_api_type and custom_api_type != "anthropic":
+        provider_config["api"] = custom_api_type
+
+    # Add secondary/heartbeat model if configured
+    if custom_hb_model:
+        hb_ctx = safe_int(custom_hb_ctx, custom_ctx)
+        hb_max = safe_int(custom_hb_max, custom_max)
+        provider_config["models"].append(
+            {"id": custom_hb_model, "name": custom_hb_name, "input": custom_input, "contextWindow": hb_ctx, "maxTokens": hb_max}
+        )
+
+    config['models']['providers'] = {custom_name: provider_config}
+    config['agents']['defaults']['model']['primary'] = f"{custom_name}/{custom_model_id}"
+    if custom_hb_model:
+        config['agents']['defaults']['heartbeat']['model'] = f"{custom_name}/{custom_hb_model}"
+    else:
+        config['agents']['defaults']['heartbeat']['model'] = f"{custom_name}/{custom_model_id}"
 
 # Skills with keys
 if openai_skills_key:

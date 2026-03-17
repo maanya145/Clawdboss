@@ -53,6 +53,7 @@ That's it. The wizard auto-installs all dependencies (Node.js 22, Python, git, b
   - [GitHub Copilot](https://github.com/features/copilot) subscription (cheapest — uses copilot-api proxy)
   - [OpenAI API key](https://platform.openai.com/api-keys) (sk-...)
   - [Anthropic API key](https://console.anthropic.com/) (sk-ant-...)
+  - **Any OpenAI-compatible provider** — Groq, Together AI, Fireworks, DeepSeek, Ollama, vLLM, Mistral, xAI, etc.
 - **A Discord bot token** — [create one here](https://discord.com/developers/applications) (if using Discord interface)
 - **A Telegram bot token** — [create one via @BotFather](https://t.me/BotFather) (if using Telegram interface)
 - **Optional:** Brave Search API key, ElevenLabs API key, OpenAI key for image gen/whisper
