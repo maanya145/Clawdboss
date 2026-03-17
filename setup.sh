@@ -676,13 +676,12 @@ collect_keys() {
       # Sanitize: lowercase, alphanumeric + hyphens only
       CUSTOM_PROVIDER_NAME=$(echo "$CUSTOM_PROVIDER_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
 
-      ask "Base URL (e.g. https://api.groq.com/openai/v1, http://localhost:11434/v1)"
-      read -r CUSTOM_BASE_URL
-      if [ -z "$CUSTOM_BASE_URL" ]; then
-        warn "Base URL is required for custom providers"
-        ask "Base URL"
+      while true; do
+        ask "Base URL (e.g. https://api.groq.com/openai/v1, http://localhost:11434/v1)"
         read -r CUSTOM_BASE_URL
-      fi
+        [ -n "$CUSTOM_BASE_URL" ] && break
+        warn "Base URL is required for custom providers"
+      done
 
       ask "API key (leave empty if not required, e.g. local Ollama)"
       read -rs CUSTOM_API_KEY
@@ -702,13 +701,12 @@ collect_keys() {
       esac
 
       echo ""
-      ask "Model ID (e.g. 'llama-3.3-70b', 'deepseek-chat', 'mixtral-8x7b')"
-      read -r CUSTOM_MODEL_ID
-      if [ -z "$CUSTOM_MODEL_ID" ]; then
-        warn "Model ID is required"
-        ask "Model ID"
+      while true; do
+        ask "Model ID (e.g. 'llama-3.3-70b', 'deepseek-chat', 'mixtral-8x7b')"
         read -r CUSTOM_MODEL_ID
-      fi
+        [ -n "$CUSTOM_MODEL_ID" ] && break
+        warn "Model ID is required"
+      done
 
       ask "Model display name [${CUSTOM_MODEL_ID}]"
       read -r CUSTOM_MODEL_NAME
@@ -986,7 +984,7 @@ ENVEOF
     echo "OPENROUTER_API_KEY=${OPENROUTER_KEY}" >> "$ENV_FILE"
   elif [ "$LLM_PROVIDER" = "kimi" ]; then
     echo "KIMI_API_KEY=${KIMI_KEY}" >> "$ENV_FILE"
-  elif [ "$LLM_PROVIDER" = "custom" ]; then
+  elif [ "$LLM_PROVIDER" = "custom" ] && [ -n "$CUSTOM_API_KEY" ]; then
     echo "" >> "$ENV_FILE"
     echo "# Custom LLM Provider (${CUSTOM_PROVIDER_NAME})" >> "$ENV_FILE"
     echo "CUSTOM_LLM_API_KEY=${CUSTOM_API_KEY}" >> "$ENV_FILE"
@@ -1422,7 +1420,11 @@ PYEOF
   unset CB_DISCORD_MAIN_CHANNEL CB_DEPLOY_COMMS CB_DEPLOY_RESEARCH CB_DEPLOY_SECURITY
   unset CB_LLM_PROVIDER CB_OPENAI_SKILLS_KEY CB_ELEVENLABS_KEY CB_BRAVE_KEY CB_GEMINI_SKILLS_KEY
   unset CB_COMMS_NAME CB_DISCORD_COMMS_CHANNEL CB_RESEARCH_NAME CB_DISCORD_RESEARCH_CHANNEL
-  unset CB_SECURITY_NAME CB_DISCORD_SECURITY_CHANNEL CB_USE_TELEGRAM CB_TELEGRAM_OWNER 2>/dev/null || true
+  unset CB_SECURITY_NAME CB_DISCORD_SECURITY_CHANNEL CB_USE_TELEGRAM CB_TELEGRAM_OWNER
+  unset CB_CUSTOM_PROVIDER_NAME CB_CUSTOM_BASE_URL CB_CUSTOM_API_KEY CB_CUSTOM_API_TYPE
+  unset CB_CUSTOM_MODEL_ID CB_CUSTOM_MODEL_NAME CB_CUSTOM_CONTEXT_WINDOW CB_CUSTOM_MAX_TOKENS
+  unset CB_CUSTOM_INPUT_MODALITIES CB_CUSTOM_HEARTBEAT_MODEL_ID CB_CUSTOM_HEARTBEAT_MODEL_NAME
+  unset CB_CUSTOM_HEARTBEAT_CTX CB_CUSTOM_HEARTBEAT_MAX 2>/dev/null || true
 }
 
 # ============================================================

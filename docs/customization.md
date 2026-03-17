@@ -122,7 +122,7 @@ You can also edit `~/.openclaw/openclaw.json` directly:
 ```
 
 Then set the API key in `~/.openclaw/.env`:
-```
+```dotenv
 CUSTOM_LLM_API_KEY=your-key-here
 ```
 
