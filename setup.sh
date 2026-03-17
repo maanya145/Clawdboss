@@ -15,6 +15,259 @@ OPENCLAW_DIR="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}"
 ENV_FILE="$OPENCLAW_DIR/.env"
 CONFIG_FILE="$OPENCLAW_DIR/openclaw.json"
 
+# ---- Answers file support (non-interactive replay) ----
+# Usage: ./setup.sh --answers ~/.openclaw/.answers
+ANSWERS_FILE=""
+ANSWERS_LINE=0
+declare -a ANSWERS_DATA=()
+
+parse_args() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --answers)
+        shift
+        ANSWERS_FILE="${1:-}"
+        if [ -z "$ANSWERS_FILE" ] || [ ! -f "$ANSWERS_FILE" ]; then
+          echo "Error: --answers requires a valid file path" >&2
+          exit 1
+        fi
+        info "Replaying answers from $ANSWERS_FILE"
+        # Load answers into array (skip comments and blank lines)
+        while IFS= read -r line || [ -n "$line" ]; do
+          [[ "$line" =~ ^#.*$ ]] && continue
+          [[ -z "$line" ]] && continue
+          ANSWERS_DATA+=("$line")
+        done < "$ANSWERS_FILE"
+        # Load existing .env so __ENV__ tokens reuse saved keys
+        if [ -f "$ENV_FILE" ]; then
+          # shellcheck disable=SC1090
+          set +u; source "$ENV_FILE" 2>/dev/null; set -u
+          # Map .env variable names to the internal variable names used by collect_keys
+          OPENAI_DIRECT_KEY="${OPENAI_API_KEY:-}"
+          ANTHROPIC_KEY="${ANTHROPIC_API_KEY:-}"
+          GEMINI_KEY="${GEMINI_API_KEY:-}"
+          OPENROUTER_KEY="${OPENROUTER_API_KEY:-}"
+          KIMI_KEY="${KIMI_API_KEY:-}"
+          CUSTOM_API_KEY="${CUSTOM_LLM_API_KEY:-}"
+          DISCORD_TOKEN="${DISCORD_BOT_TOKEN:-}"
+          TELEGRAM_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+          OPENAI_SKILLS_KEY="${OPENAI_API_KEY:-}"
+          GEMINI_SKILLS_KEY="${GEMINI_API_KEY:-}"
+          ELEVENLABS_KEY="${ELEVENLABS_API_KEY:-}"
+          BRAVE_KEY="${BRAVE_API_KEY:-}"
+        fi
+        ;;
+      --help|-h)
+        echo "Usage: ./setup.sh [--answers FILE]"
+        echo ""
+        echo "  --answers FILE  Replay a saved answers file (non-interactive)"
+        echo ""
+        echo "After first run, answers are saved to ~/.openclaw/.answers"
+        echo "Re-run: ./setup.sh --answers ~/.openclaw/.answers"
+        exit 0
+        ;;
+    esac
+    shift
+  done
+}
+
+# When answers file is loaded, this function replaces interactive reads.
+# It auto-fills from the answers array. For __ENV__ tokens, it reads
+# the corresponding value from the existing .env file.
+_next_answer() {
+  if [ "$ANSWERS_LINE" -lt "${#ANSWERS_DATA[@]}" ]; then
+    local answer="${ANSWERS_DATA[$ANSWERS_LINE]}"
+    ANSWERS_LINE=$((ANSWERS_LINE + 1))
+    if [ "$answer" = "__EMPTY__" ]; then
+      echo ""
+    elif [ "$answer" = "__ENV__" ]; then
+      # Signal to the caller that this value should come from .env
+      echo "__ENV__"
+    else
+      echo "$answer"
+    fi
+    return 0
+  fi
+  return 1
+}
+
+# When --answers is active, override `read` to auto-fill from the answers array.
+# This is a bash function that shadows the builtin — transparent to all callers.
+# Supports: read -r VAR, read -rs VAR (silent/secret), read -r (into REPLY)
+enable_answers_mode() {
+  [ -z "$ANSWERS_FILE" ] && return
+
+  # Define read as a function that overrides the builtin
+  read() {
+    local silent=false
+    local raw=false
+    local varname="REPLY"
+    local read_args=()
+
+    # Parse flags the same way bash read does
+    local OPTIND=1
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -r)  raw=true; read_args+=(-r); shift ;;
+        -s)  silent=true; shift ;;
+        -rs|-sr) raw=true; silent=true; read_args+=(-r); shift ;;
+        -*)  read_args+=("$1"); shift ;;
+        *)   varname="$1"; shift ;;
+      esac
+    done
+
+    if [ "$ANSWERS_LINE" -lt "${#ANSWERS_DATA[@]}" ]; then
+      local answer="${ANSWERS_DATA[$ANSWERS_LINE]}"
+      ANSWERS_LINE=$((ANSWERS_LINE + 1))
+
+      # Handle special tokens
+      if [ "$answer" = "__EMPTY__" ]; then
+        answer=""
+      elif [ "$answer" = "__ENV__" ]; then
+        # Secret values: keep existing variable value (pre-loaded from .env)
+        # Don't overwrite — just consume the answer line and return
+        if [ "$silent" = true ]; then
+          echo -e " ${CYAN}(auto)${NC} [from .env]" >&2
+        else
+          echo -e " ${CYAN}(auto)${NC} [from .env]" >&2
+        fi
+        return 0
+      fi
+
+      printf -v "$varname" '%s' "$answer"
+      if [ "$silent" = true ]; then
+        echo -e " ${CYAN}(auto)${NC} ****" >&2
+      elif [ -n "$answer" ]; then
+        echo -e " ${CYAN}(auto)${NC} $answer" >&2
+      else
+        echo -e " ${CYAN}(auto)${NC} [empty]" >&2
+      fi
+      return 0
+    fi
+
+    # Answers exhausted — fall back to interactive
+    if [ "$silent" = true ]; then
+      builtin read -rs "$varname"
+    elif [ "$raw" = true ]; then
+      builtin read -r "$varname"
+    else
+      builtin read "$varname"
+    fi
+  }
+}
+
+# Save all collected answers to a file for replay
+save_answers() {
+  local answers_out="$OPENCLAW_DIR/.answers"
+  cat > "$answers_out" << 'HEADER'
+# Clawdboss answers file — generated by setup.sh
+# Re-run setup without prompts: ./setup.sh --answers ~/.openclaw/.answers
+# Lines starting with # are comments. __EMPTY__ = blank answer.
+# API keys are read from ~/.openclaw/.env — edit that file to update secrets.
+HEADER
+
+  # User info
+  echo "# --- User Info ---" >> "$answers_out"
+  echo "${USER_NAME:-User}" >> "$answers_out"
+  echo "${USER_TIMEZONE:-UTC}" >> "$answers_out"
+  echo "${USER_LOCATION:-__EMPTY__}" >> "$answers_out"
+  echo "${USER_PRONOUNS:-they/them}" >> "$answers_out"
+  echo "${USER_ROLE_CHOICE:-7}" >> "$answers_out"
+  echo "${USER_DESCRIPTION:-__EMPTY__}" >> "$answers_out"
+  echo "${USER_USECASE_CHOICE:-6}" >> "$answers_out"
+  echo "${USER_EXTRA:-__EMPTY__}" >> "$answers_out"
+
+  # Agent info
+  echo "# --- Agent Info ---" >> "$answers_out"
+  echo "${AGENT_NAME:-Assistant}" >> "$answers_out"
+  echo "${AGENT_PRONOUNS:-they/them}" >> "$answers_out"
+  echo "${EMOJI_CHOICE:-1}" >> "$answers_out"
+  echo "${AGENT_VIBE_CHOICE:-2}" >> "$answers_out"
+  # If vibe was custom (choice 6), save the custom text on the next line
+  if [ "${AGENT_VIBE_CHOICE:-2}" = "6" ]; then
+    echo "${AGENT_VIBE:-Helpful and adaptable}" >> "$answers_out"
+  fi
+  echo "${AGENT_MISSION:-__EMPTY__}" >> "$answers_out"
+  echo "${AGENT_EXPERTISE:-__EMPTY__}" >> "$answers_out"
+  echo "${TIER_CHOICE:-1}" >> "$answers_out"
+  echo "${INTERFACE_CHOICE:-1}" >> "$answers_out"
+
+  # Specialist names (only if deployed)
+  if [ "${DEPLOY_COMMS:-false}" = true ]; then
+    echo "${COMMS_NAME:-Knox}" >> "$answers_out"
+  fi
+  if [ "${DEPLOY_RESEARCH:-false}" = true ]; then
+    echo "${RESEARCH_NAME:-Trace}" >> "$answers_out"
+  fi
+  if [ "${DEPLOY_SECURITY:-false}" = true ]; then
+    echo "${SECURITY_NAME:-Sentinel}" >> "$answers_out"
+  fi
+
+  # LLM provider
+  echo "# --- LLM Provider ---" >> "$answers_out"
+  echo "${PROVIDER_CHOICE:-6}" >> "$answers_out"
+  # Provider-specific: use __ENV__ token so keys come from .env, not this file
+  case "${LLM_PROVIDER:-copilot}" in
+    openai)      echo "__ENV__" >> "$answers_out" ;;
+    anthropic)   echo "__ENV__" >> "$answers_out" ;;
+    gemini)      echo "__ENV__" >> "$answers_out" ;;
+    openrouter)  echo "__ENV__" >> "$answers_out" ;;
+    kimi)        echo "__ENV__" >> "$answers_out" ;;
+    custom)
+      echo "${CUSTOM_PROVIDER_NAME:-custom}" >> "$answers_out"
+      echo "${CUSTOM_BASE_URL:-}" >> "$answers_out"
+      echo "__ENV__" >> "$answers_out"
+      echo "${CUSTOM_API_TYPE_CHOICE:-1}" >> "$answers_out"
+      echo "${CUSTOM_MODEL_ID:-}" >> "$answers_out"
+      echo "${CUSTOM_MODEL_NAME:-__EMPTY__}" >> "$answers_out"
+      echo "${CUSTOM_CONTEXT_WINDOW:-128000}" >> "$answers_out"
+      echo "${CUSTOM_MAX_TOKENS:-16384}" >> "$answers_out"
+      echo "${CUSTOM_INPUT_CHOICE:-1}" >> "$answers_out"
+      echo "${CUSTOM_HEARTBEAT_MODEL_ID:-__EMPTY__}" >> "$answers_out"
+      if [ -n "${CUSTOM_HEARTBEAT_MODEL_ID:-}" ]; then
+        echo "${CUSTOM_HEARTBEAT_MODEL_NAME:-__EMPTY__}" >> "$answers_out"
+        echo "${CUSTOM_HEARTBEAT_CTX:-__EMPTY__}" >> "$answers_out"
+        echo "${CUSTOM_HEARTBEAT_MAX:-__EMPTY__}" >> "$answers_out"
+      fi
+      ;;
+  esac
+
+  # Discord/Telegram credentials use __ENV__ tokens
+  if [ "${USE_DISCORD:-false}" = true ]; then
+    echo "# --- Discord ---" >> "$answers_out"
+    echo "__ENV__" >> "$answers_out"
+    echo "${DISCORD_GUILD:-}" >> "$answers_out"
+    echo "${DISCORD_OWNER:-}" >> "$answers_out"
+    echo "${DISCORD_MAIN_CHANNEL:-}" >> "$answers_out"
+    if [ "${DEPLOY_COMMS:-false}" = true ]; then
+      echo "${DISCORD_COMMS_CHANNEL:-}" >> "$answers_out"
+    fi
+    if [ "${DEPLOY_RESEARCH:-false}" = true ]; then
+      echo "${DISCORD_RESEARCH_CHANNEL:-}" >> "$answers_out"
+    fi
+    if [ "${DEPLOY_SECURITY:-false}" = true ]; then
+      echo "${DISCORD_SECURITY_CHANNEL:-}" >> "$answers_out"
+    fi
+  fi
+
+  if [ "${USE_TELEGRAM:-false}" = true ]; then
+    echo "# --- Telegram ---" >> "$answers_out"
+    echo "__ENV__" >> "$answers_out"
+    echo "${TELEGRAM_OWNER_ID:-}" >> "$answers_out"
+  fi
+
+  # Optional keys
+  echo "# --- Optional Keys ---" >> "$answers_out"
+  echo "__ENV__" >> "$answers_out"  # Brave
+  echo "__ENV__" >> "$answers_out"  # OpenAI skills
+  echo "__ENV__" >> "$answers_out"  # Gemini skills
+  echo "__ENV__" >> "$answers_out"  # ElevenLabs
+
+  chmod 600 "$answers_out"
+  success "Answers saved to $answers_out"
+  info "Re-run without prompts: ./setup.sh --answers $answers_out"
+}
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -45,6 +298,12 @@ success() { echo -e "${GREEN}✅${NC} $1"; }
 warn()    { echo -e "${YELLOW}⚠️${NC}  $1"; }
 error()   { echo -e "${RED}❌${NC} $1"; }
 ask()     { echo -en "${CYAN}?${NC}  $1: "; }
+
+# Detect whether systemd is available as the init system.
+# Returns 0 if systemctl is usable, 1 otherwise (containers, WSL1, etc.)
+has_systemd() {
+  [ -d /run/systemd/system ] && command -v systemctl &>/dev/null
+}
 
 # Download a file and verify its SHA-256 checksum.
 # Usage: download_verified <url> <output_path> <expected_sha256>
@@ -2388,9 +2647,13 @@ main() {
 
   # Check for existing config
   if [ -f "$CONFIG_FILE" ]; then
-    warn "Existing config found at $CONFIG_FILE"
-    ask "Overwrite? This will backup the current config [y/N]"
-    read -r OVERWRITE
+    if [ -n "$ANSWERS_FILE" ]; then
+      OVERWRITE="y"
+    else
+      warn "Existing config found at $CONFIG_FILE"
+      ask "Overwrite? This will backup the current config [y/N]"
+      read -r OVERWRITE
+    fi
     if [[ ! "$OVERWRITE" =~ ^[Yy] ]]; then
       info "Aborting. Your existing config is untouched."
       exit 0
@@ -2575,7 +2838,7 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 [Install]
 WantedBy=multi-user.target
 CADDYSVC
-                      systemctl daemon-reload 2>/dev/null
+                      systemctl daemon-reload 2>/dev/null || true
                     fi
 
                     success "Caddy ${CADDY_VER} installed from GitHub release"
@@ -2822,7 +3085,7 @@ maxretry = 5
 enabled = true
 JAIL_EOF
       if [ $? -eq 0 ]; then
-        sudo systemctl restart fail2ban 2>/dev/null
+        sudo systemctl restart fail2ban 2>/dev/null || true
         success "SSH jail configured (ban 1h after 5 failures in 10m)"
       else
         warn "Could not create jail.local. Configure manually: /etc/fail2ban/jail.local"
@@ -2972,7 +3235,7 @@ JAIL_EOF
     fi
   else
     # Non-root — try systemd service, fall back to tmux
-    if [ -d /etc/systemd/system ] && command -v systemctl &>/dev/null; then
+    if has_systemd; then
       # Create systemd service if it doesn't exist
       if [ ! -f /etc/systemd/system/openclaw.service ]; then
         info "Setting up OpenClaw as a systemd service..."
@@ -3012,12 +3275,12 @@ RestrictSUIDSGID=true
 [Install]
 WantedBy=multi-user.target
 SVCEOF
-        sudo systemctl daemon-reload 2>/dev/null
-        sudo systemctl enable openclaw 2>/dev/null
+        sudo systemctl daemon-reload 2>/dev/null || true
+        sudo systemctl enable openclaw 2>/dev/null || true
         success "Systemd service created and enabled"
       fi
 
-      sudo systemctl start openclaw 2>/dev/null
+      sudo systemctl start openclaw 2>/dev/null || true
       sleep 2
       if systemctl is-active --quiet openclaw 2>/dev/null; then
         success "Gateway started via systemd"
@@ -3059,6 +3322,9 @@ SVCEOF
 
   # ---- Server Hardening ----
   harden_server
+
+  # Save answers for non-interactive replay
+  save_answers
 
   show_summary
 }
@@ -3794,4 +4060,6 @@ harden_server() {
   fi
 }
 
+parse_args "$@"
+enable_answers_mode
 main "$@"
